@@ -60,6 +60,7 @@ class HarborTaskFactory:
         issues = self.validate(task_dir, candidate)
         if issues:
             import logging
+
             logger = logging.getLogger(__name__)
             for issue in issues:
                 logger.warning("task %s: %s", task_name, issue)
@@ -79,16 +80,25 @@ class HarborTaskFactory:
         base_sha = raw.get("base_sha", "")
         repo_url = raw.get("repo_clone_url", "")
         if not base_sha or not _VALID_SHA_RE.fullmatch(base_sha):
-            issues.append("missing or invalid base_sha — Dockerfile won't checkout correct commit")
+            issues.append(
+                "missing or invalid base_sha — Dockerfile won't checkout correct commit"
+            )
         if not repo_url or not _VALID_CLONE_URL_RE.fullmatch(repo_url):
-            issues.append("missing or invalid repo_clone_url — Dockerfile won't clone repo")
+            issues.append(
+                "missing or invalid repo_clone_url — Dockerfile won't clone repo"
+            )
 
-        # Must have source patches (not just test patches)
+        # Must have source patches (not just test patches) that survive
+        # the same path-safety filter _write_solution applies
         patches = raw.get("patches", {})
-        source_patches = {
-            f: p for f, p in patches.items()
-            if not TEST_FILE_RE.search(f) and p.strip()
-        }
+        source_patches = {}
+        for f, p in patches.items():
+            if TEST_FILE_RE.search(f) or not p.strip():
+                continue
+            safe = os.path.normpath(f).lstrip("/")
+            if ".." in safe or os.path.isabs(safe):
+                continue
+            source_patches[f] = p
         if not source_patches:
             issues.append("no source patches — solve.sh has no oracle solution")
 

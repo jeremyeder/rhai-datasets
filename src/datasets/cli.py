@@ -260,15 +260,17 @@ def validate_dataset(dataset_dir: Path, base_commit: str | None, fix: bool) -> N
     import tempfile
 
     tasks = sorted(
-        d for d in dataset_dir.iterdir()
-        if d.is_dir() and d.name.startswith("task-")
+        d for d in dataset_dir.iterdir() if d.is_dir() and d.name.startswith("task-")
     )
 
     repo_dir = None
     if base_commit:
-        repo_dir = tempfile.mkdtemp()
         dockerfile = next(
-            (t / "environment" / "Dockerfile" for t in tasks if (t / "environment" / "Dockerfile").exists()),
+            (
+                t / "environment" / "Dockerfile"
+                for t in tasks
+                if (t / "environment" / "Dockerfile").exists()
+            ),
             None,
         )
         repo_url = None
@@ -278,17 +280,30 @@ def validate_dataset(dataset_dir: Path, base_commit: str | None, fix: bool) -> N
                 repo_url = m.group(1)
         if repo_url:
             click.echo(f"Cloning {repo_url} at {base_commit} for patch validation...")
-            subprocess.run(
-                ["git", "clone", "--quiet", repo_url, repo_dir],
-                capture_output=True, timeout=120,
-            )
-            subprocess.run(
-                ["git", "checkout", "--quiet", base_commit],
-                capture_output=True, cwd=repo_dir,
-            )
+            tmp = tempfile.mkdtemp()
+            try:
+                subprocess.run(
+                    ["git", "clone", "--quiet", repo_url, tmp],
+                    capture_output=True,
+                    timeout=120,
+                    check=True,
+                )
+                subprocess.run(
+                    ["git", "checkout", "--quiet", base_commit],
+                    capture_output=True,
+                    cwd=tmp,
+                    check=True,
+                )
+                repo_dir = tmp
+            except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
+                click.echo(
+                    f"WARNING: git setup failed ({exc}), skipping patch validation"
+                )
+                shutil.rmtree(tmp, ignore_errors=True)
         else:
-            click.echo("WARNING: could not determine repo URL, skipping patch validation")
-            repo_dir = None
+            click.echo(
+                "WARNING: could not determine repo URL, skipping patch validation"
+            )
 
     valid = 0
     invalid = 0
@@ -329,11 +344,15 @@ def validate_dataset(dataset_dir: Path, base_commit: str | None, fix: bool) -> N
             patch_file = Path(repo_dir) / "_check.patch"
             patch_file.write_text(patch_content)
             r = subprocess.run(
-                ["git", "apply", "--check", "--reverse", str(patch_file)],
-                capture_output=True, text=True, cwd=repo_dir,
+                ["git", "apply", "--check", str(patch_file)],
+                capture_output=True,
+                text=True,
+                cwd=repo_dir,
             )
             if r.returncode != 0:
-                first_err = r.stderr.strip().splitlines()[0] if r.stderr.strip() else "unknown"
+                first_err = (
+                    r.stderr.strip().splitlines()[0] if r.stderr.strip() else "unknown"
+                )
                 issues.append(f"patch doesn't apply: {first_err[:60]}")
 
         if issues:
