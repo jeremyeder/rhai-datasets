@@ -57,7 +57,57 @@ class HarborTaskFactory:
         self._write_tests(task_dir, candidate)
         self._write_solution(task_dir, candidate)
 
+        issues = self.validate(task_dir, candidate)
+        if issues:
+            import logging
+
+            logger = logging.getLogger(__name__)
+            for issue in issues:
+                logger.warning("task %s: %s", task_name, issue)
+
         return task_dir
+
+    def validate(
+        self,
+        task_dir: Path,
+        candidate: CandidateArtifact,
+    ) -> list[str]:
+        """Validate a generated task. Returns a list of issues (empty = valid)."""
+        issues: list[str] = []
+        raw = candidate.raw_data
+
+        # Must have base_sha and repo_clone_url for reproducible builds
+        base_sha = raw.get("base_sha", "")
+        repo_url = raw.get("repo_clone_url", "")
+        if not base_sha or not _VALID_SHA_RE.fullmatch(base_sha):
+            issues.append(
+                "missing or invalid base_sha — Dockerfile won't checkout correct commit"
+            )
+        if not repo_url or not _VALID_CLONE_URL_RE.fullmatch(repo_url):
+            issues.append(
+                "missing or invalid repo_clone_url — Dockerfile won't clone repo"
+            )
+
+        # Must have source patches (not just test patches) that survive
+        # the same path-safety filter _write_solution applies
+        patches = raw.get("patches", {})
+        source_patches = {}
+        for f, p in patches.items():
+            if TEST_FILE_RE.search(f) or not p.strip():
+                continue
+            safe = os.path.normpath(f).lstrip("/")
+            if ".." in safe or os.path.isabs(safe):
+                continue
+            source_patches[f] = p
+        if not source_patches:
+            issues.append("no source patches — solve.sh has no oracle solution")
+
+        # Solution patch should apply cleanly to base_sha (optional, expensive)
+        solve_sh = task_dir / "solution" / "solve.sh"
+        if solve_sh.exists() and "No source patches" in solve_sh.read_text():
+            issues.append("solve.sh is placeholder — no actual solution")
+
+        return issues
 
     def create_dataset_toml(self, output_dir: Path, dataset_name: str) -> None:
         toml = textwrap.dedent(f"""\
