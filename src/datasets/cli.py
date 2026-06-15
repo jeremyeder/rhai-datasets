@@ -234,3 +234,124 @@ def create_dataset(input_file: Path, fmt: str, output_dir: Path) -> None:
         click.echo(f"  Created: {output_dir / 'dataset.toml'}")
 
     click.echo(f"Created {len(candidates)} {fmt} tasks in {output_dir}")
+
+
+@main.command("validate")
+@click.argument(
+    "dataset_dir",
+    type=click.Path(exists=True, path_type=Path),
+)
+@click.option(
+    "--base-commit",
+    default=None,
+    help="Git commit to validate patches against (clones repo and runs git apply --check)",
+)
+@click.option("--fix/--no-fix", default=False, help="Remove invalid tasks")
+def validate_dataset(dataset_dir: Path, base_commit: str | None, fix: bool) -> None:
+    """Validate harbor tasks in a dataset directory.
+
+    Checks each task for: valid Dockerfile (repo checkout), source patches
+    in solve.sh, and optionally that patches apply to a base commit.
+    """
+    import base64
+    import re
+    import shutil
+    import subprocess
+    import tempfile
+
+    tasks = sorted(
+        d for d in dataset_dir.iterdir()
+        if d.is_dir() and d.name.startswith("task-")
+    )
+
+    repo_dir = None
+    if base_commit:
+        repo_dir = tempfile.mkdtemp()
+        dockerfile = next(
+            (t / "environment" / "Dockerfile" for t in tasks if (t / "environment" / "Dockerfile").exists()),
+            None,
+        )
+        repo_url = None
+        if dockerfile:
+            m = re.search(r"git clone (\S+)", dockerfile.read_text())
+            if m:
+                repo_url = m.group(1)
+        if repo_url:
+            click.echo(f"Cloning {repo_url} at {base_commit} for patch validation...")
+            subprocess.run(
+                ["git", "clone", "--quiet", repo_url, repo_dir],
+                capture_output=True, timeout=120,
+            )
+            subprocess.run(
+                ["git", "checkout", "--quiet", base_commit],
+                capture_output=True, cwd=repo_dir,
+            )
+        else:
+            click.echo("WARNING: could not determine repo URL, skipping patch validation")
+            repo_dir = None
+
+    valid = 0
+    invalid = 0
+    for task_dir in tasks:
+        issues = []
+        name = task_dir.name
+
+        # Check Dockerfile has git clone
+        dockerfile = task_dir / "environment" / "Dockerfile"
+        if dockerfile.exists():
+            content = dockerfile.read_text()
+            if "git clone" not in content:
+                issues.append("Dockerfile missing git clone (no repo checkout)")
+        else:
+            issues.append("no Dockerfile")
+
+        # Check solve.sh has real patches
+        solve_sh = task_dir / "solution" / "solve.sh"
+        patch_content = None
+        if solve_sh.exists():
+            text = solve_sh.read_text()
+            if "No source patches" in text:
+                issues.append("no source patches in solve.sh")
+            else:
+                m = re.search(r"printf\s+'%s'\s+'([A-Za-z0-9+/=]+)'", text)
+                if m:
+                    try:
+                        patch_content = base64.b64decode(m.group(1)).decode()
+                    except Exception:
+                        issues.append("base64 decode failed for solution patch")
+                else:
+                    issues.append("no base64 patch found in solve.sh")
+        else:
+            issues.append("no solve.sh")
+
+        # Check patch applies to base commit
+        if repo_dir and patch_content and not issues:
+            patch_file = Path(repo_dir) / "_check.patch"
+            patch_file.write_text(patch_content)
+            r = subprocess.run(
+                ["git", "apply", "--check", "--reverse", str(patch_file)],
+                capture_output=True, text=True, cwd=repo_dir,
+            )
+            if r.returncode != 0:
+                first_err = r.stderr.strip().splitlines()[0] if r.stderr.strip() else "unknown"
+                issues.append(f"patch doesn't apply: {first_err[:60]}")
+
+        if issues:
+            icon = "✗"
+            invalid += 1
+            if fix:
+                shutil.rmtree(task_dir)
+                icon = "✗ REMOVED"
+        else:
+            icon = "✓"
+            valid += 1
+
+        status = "; ".join(issues) if issues else "OK"
+        click.echo(f"  {icon} {name}: {status}")
+
+    click.echo(f"\n{valid} valid, {invalid} invalid out of {len(tasks)} tasks")
+    if fix and invalid:
+        click.echo(f"Removed {invalid} invalid tasks")
+
+    if repo_dir:
+        shutil.rmtree(repo_dir, ignore_errors=True)
