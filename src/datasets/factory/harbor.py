@@ -206,6 +206,9 @@ class HarborTaskFactory:
         sha_valid = bool(base_sha and _VALID_SHA_RE.fullmatch(base_sha))
         lang = _detect_language(candidate.raw_data.get("files", []))
 
+        # Harbor uploads only the environment/ dir as build context.
+        # instruction.md, tests/, and solution/ are managed by harbor
+        # separately — do NOT COPY them in the Dockerfile.
         _DOCKERFILES = {
             "go": textwrap.dedent(f"""\
                 FROM golang:latest
@@ -214,9 +217,6 @@ class HarborTaskFactory:
                 WORKDIR /testbed
                 RUN git clone {repo_url} /testbed \\
                     && git checkout {base_sha}
-                COPY instruction.md /app/instruction.md
-                COPY tests/ /tests/
-                COPY solution/ /solution/
                 RUN mkdir -p /logs/verifier
             """),
             "python": textwrap.dedent(f"""\
@@ -228,9 +228,6 @@ class HarborTaskFactory:
                 WORKDIR /testbed
                 RUN git clone {repo_url} /testbed \\
                     && git checkout {base_sha}
-                COPY instruction.md /app/instruction.md
-                COPY tests/ /tests/
-                COPY solution/ /solution/
                 RUN mkdir -p /logs/verifier
             """),
         }
