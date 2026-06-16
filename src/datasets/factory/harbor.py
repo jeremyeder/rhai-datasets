@@ -37,6 +37,39 @@ def _repo_slug(repo_full_name: str) -> str:
     return repo_full_name.split("/")[-1] if "/" in repo_full_name else repo_full_name
 
 
+def _detect_language(files: list[str]) -> str:
+    """Detect primary language from file extensions."""
+    ext_counts: dict[str, int] = {}
+    for f in files:
+        ext = Path(f).suffix.lower()
+        if ext:
+            ext_counts[ext] = ext_counts.get(ext, 0) + 1
+
+    go_signals = ext_counts.get(".go", 0)
+    py_signals = ext_counts.get(".py", 0)
+    java_signals = ext_counts.get(".java", 0)
+    ts_signals = ext_counts.get(".ts", 0) + ext_counts.get(".tsx", 0)
+    rs_signals = ext_counts.get(".rs", 0)
+
+    # Also check for language-specific config files
+    file_names = {Path(f).name for f in files}
+    if "go.mod" in file_names or "go.sum" in file_names:
+        go_signals += 5
+    if "pyproject.toml" in file_names or "setup.py" in file_names:
+        py_signals += 5
+    if "Cargo.toml" in file_names:
+        rs_signals += 5
+    if "pom.xml" in file_names or "build.gradle" in file_names:
+        java_signals += 5
+    if "package.json" in file_names:
+        ts_signals += 5
+
+    scores = {"go": go_signals, "python": py_signals, "java": java_signals,
+              "typescript": ts_signals, "rust": rs_signals}
+    best = max(scores, key=scores.get)  # type: ignore[arg-type]
+    return best if scores[best] > 0 else "python"
+
+
 class HarborTaskFactory:
     @property
     def format_name(self) -> str:
@@ -171,9 +204,22 @@ class HarborTaskFactory:
         base_sha = candidate.raw_data.get("base_sha", "")
         url_valid = bool(repo_url and _VALID_CLONE_URL_RE.fullmatch(repo_url))
         sha_valid = bool(base_sha and _VALID_SHA_RE.fullmatch(base_sha))
+        lang = _detect_language(candidate.raw_data.get("files", []))
 
-        if url_valid and sha_valid:
-            dockerfile = textwrap.dedent(f"""\
+        _DOCKERFILES = {
+            "go": textwrap.dedent(f"""\
+                FROM golang:latest
+                RUN apt-get update && apt-get install -y --no-install-recommends \\
+                    git patch && rm -rf /var/lib/apt/lists/*
+                WORKDIR /testbed
+                RUN git clone {repo_url} /testbed \\
+                    && git checkout {base_sha}
+                COPY instruction.md /app/instruction.md
+                COPY tests/ /tests/
+                COPY solution/ /solution/
+                RUN mkdir -p /logs/verifier
+            """),
+            "python": textwrap.dedent(f"""\
                 FROM python:3.12-slim
                 ENV DEBIAN_FRONTEND=noninteractive
                 RUN apt-get update && apt-get install -y --no-install-recommends \\
@@ -186,7 +232,11 @@ class HarborTaskFactory:
                 COPY tests/ /tests/
                 COPY solution/ /solution/
                 RUN mkdir -p /logs/verifier
-            """)
+            """),
+        }
+
+        if url_valid and sha_valid:
+            dockerfile = _DOCKERFILES.get(lang, _DOCKERFILES["python"])
         else:
             dockerfile = textwrap.dedent("""\
                 FROM python:3.12-slim
@@ -242,15 +292,36 @@ class HarborTaskFactory:
             )
             extracted_names.append("test_outputs.py")
 
-        test_targets = " ".join(shlex.quote(f"/tests/{n}") for n in extracted_names)
-        test_sh = textwrap.dedent(f"""\
-            #!/bin/bash
-            mkdir -p /logs/verifier
-            uvx --with pytest==8.4.1 --with pytest-json-ctrf==0.3.5 \\
-              pytest --ctrf /logs/verifier/ctrf.json {test_targets} -rA -v
-            if [ $? -eq 0 ]; then echo 1 > /logs/verifier/reward.txt; else echo 0 > /logs/verifier/reward.txt; fi
-            exit 0
-        """)
+        lang = _detect_language(candidate.raw_data.get("files", []))
+
+        if lang == "go":
+            # For Go, run tests from the repo root — test files are part of
+            # the repo packages, not standalone scripts
+            go_test_dirs = set()
+            for f in candidate.raw_data.get("files", []):
+                if f.endswith("_test.go"):
+                    go_test_dirs.add("./" + str(Path(f).parent) + "/...")
+            if not go_test_dirs:
+                go_test_dirs = {"./..."}
+            go_targets = " ".join(sorted(go_test_dirs))
+            test_sh = textwrap.dedent(f"""\
+                #!/bin/bash
+                mkdir -p /logs/verifier
+                cd /testbed
+                go test -v -count=1 {go_targets} 2>&1 | tee /logs/verifier/test-stdout.txt
+                if [ ${{PIPESTATUS[0]}} -eq 0 ]; then echo 1 > /logs/verifier/reward.txt; else echo 0 > /logs/verifier/reward.txt; fi
+                exit 0
+            """)
+        else:
+            test_targets = " ".join(shlex.quote(f"/tests/{n}") for n in extracted_names)
+            test_sh = textwrap.dedent(f"""\
+                #!/bin/bash
+                mkdir -p /logs/verifier
+                uvx --with pytest==8.4.1 --with pytest-json-ctrf==0.3.5 \\
+                  pytest --ctrf /logs/verifier/ctrf.json {test_targets} -rA -v
+                if [ $? -eq 0 ]; then echo 1 > /logs/verifier/reward.txt; else echo 0 > /logs/verifier/reward.txt; fi
+                exit 0
+            """)
         test_sh_path = tests_dir / "test.sh"
         test_sh_path.write_text(test_sh)
         test_sh_path.chmod(0o755)
