@@ -1,0 +1,23 @@
+version = "1.0"
+name = "rhai-github/data-science-pipelines-operator/task-0000"
+
+[metadata]
+author_name = "rhai-datasets"
+author_email = ""
+difficulty = "medium"
+difficulty_explanation = "Estimated from patch size, file count, and component spread"
+category = "github_pr"
+tags = ["auto-generated", "github_pr"]
+
+[verifier]
+timeout_sec = 900.0
+
+[agent]
+timeout_sec = 900.0
+
+[environment]
+build_timeout_sec = 600.0
+network_mode = "public"
+cpus = 4
+memory_mb = 8192
+storage_mb = 10240

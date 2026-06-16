@@ -1,0 +1,4 @@
+[dataset]
+name = "rhai/harbor-dsp-v1"
+version = "1.0.0"
+description = "Auto-generated harbor tasks from opendatahub-io/data-science-pipelines-operator PRs"
