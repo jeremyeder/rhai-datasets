@@ -1,0 +1,49 @@
+--- a/maas-api/internal/api_keys/store_mock.go
++++ b/maas-api/internal/api_keys/store_mock.go
+@@ -334,6 +334,18 @@ func (m *MockStore) Search(
+ 	now := time.Now().UTC()
+ 	allKeys := m.filterKeys(username, filters.Status, includeEphemeral, now)
+ 
++	// Filter by subscription
++	if filters.Subscription != nil && *filters.Subscription != "" {
++		sub := strings.TrimSpace(*filters.Subscription)
++		filtered := allKeys[:0]
++		for _, k := range allKeys {
++			if k.Subscription == sub {
++				filtered = append(filtered, k)
++			}
++		}
++		allKeys = filtered
++	}
++
+ 	// Sort keys
+ 	sort.Slice(allKeys, func(i, j int) bool {
+ 		return compareKeys(allKeys[i], allKeys[j], sortParams.By, sortParams.Order)
+--- a/maas-api/internal/api_keys/store_postgres.go
++++ b/maas-api/internal/api_keys/store_postgres.go
+@@ -234,6 +234,13 @@ func (s *PostgresStore) Search(
+ 		whereClauses = append(whereClauses, fmt.Sprintf("(%s) IN (%s)", effectiveStatusExpr, strings.Join(placeholders, ",")))
+ 	}
+ 
++	// Filter by subscription name
++	if filters.Subscription != nil && *filters.Subscription != "" {
++		whereClauses = append(whereClauses, fmt.Sprintf("subscription = $%d", argPos))
++		args = append(args, strings.TrimSpace(*filters.Subscription))
++		argPos++
++	}
++
+ 	// Build final WHERE clause
+ 	whereClause := ""
+ 	if len(whereClauses) > 0 {
+--- a/maas-api/internal/api_keys/types.go
++++ b/maas-api/internal/api_keys/types.go
+@@ -88,6 +88,9 @@ type SearchFilters struct {
+ 	HasExpiration *bool `json:"hasExpiration,omitempty"` // true = expiring, false = permanent
+ 	HasBeenUsed   *bool `json:"hasBeenUsed,omitempty"`   // true = used, false = never used
+ 
++	// Subscription filter
++	Subscription *string `json:"subscription,omitempty"` // Filter by bound subscription name
++
+ 	// Ephemeral key filter
+ 	IncludeEphemeral *bool `json:"includeEphemeral,omitempty"` // Include ephemeral keys in results (default: false)
+ }

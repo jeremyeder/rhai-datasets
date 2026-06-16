@@ -1,0 +1,119 @@
+--- a/maas-controller/pkg/controller/maas/annotations.go
++++ b/maas-controller/pkg/controller/maas/annotations.go
+@@ -16,10 +16,15 @@ limitations under the License.
+ 
+ package maas
+ 
+-import metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
++import (
++	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
++
++	"github.com/opendatahub-io/models-as-a-service/maas-controller/pkg/platform/tenantreconcile"
++)
+ 
+ // ManagedByODHOperator is used to denote if a resource/component should be reconciled - when missing or true, reconcile.
+-const ManagedByODHOperator = "opendatahub.io/managed"
++// This aliases tenantreconcile.AnnotationManaged so there is a single canonical definition.
++const ManagedByODHOperator = tenantreconcile.AnnotationManaged
+ 
+ // isManaged reports whether obj has explicitly opted out of maas or opendatahub controller management.
+ func isManaged(obj metav1.Object) bool {
+--- a/maas-controller/pkg/platform/tenantreconcile/constants.go
++++ b/maas-controller/pkg/platform/tenantreconcile/constants.go
+@@ -23,6 +23,12 @@ func isOptionalAPIGroup(group string) bool {
+ }
+ 
+ const (
++	// AnnotationManaged is the opt-out annotation key used by the ODH operator and MaaS
++	// controller. Resources annotated with this key set to "false" are skipped on both
++	// the write (create/update) and delete paths. This is the single source of truth;
++	// other packages that need the same key must reference this constant.
++	AnnotationManaged = "opendatahub.io/managed"
++
+ 	// ComponentName is the ODH component label key suffix (app.opendatahub.io/<name>).
+ 	// This is the DSC component identifier, not a standalone CR kind.
+ 	ComponentName = "modelsasservice"
+--- a/maas-controller/pkg/platform/tenantreconcile/postrender.go
++++ b/maas-controller/pkg/platform/tenantreconcile/postrender.go
+@@ -30,7 +30,7 @@ func PostRender(ctx context.Context, log logr.Logger, tenant *maasv1alpha1.Tenan
+ 
+ 		// Skip resources with opendatahub.io/managed: false annotation
+ 		annotations := resource.GetAnnotations()
+-		if annotations != nil && annotations["opendatahub.io/managed"] == "false" {
++		if annotations != nil && annotations[AnnotationManaged] == "false" {
+ 			log.V(2).Info("Skipping resource due to opendatahub.io/managed=false annotation",
+ 				"kind", resource.GetKind(), "name", resource.GetName(), "namespace", resource.GetNamespace())
+ 			continue
+@@ -105,7 +105,7 @@ func setManagedFalseAnnotation(resources []unstructured.Unstructured) {
+ 			if ann == nil {
+ 				ann = make(map[string]string)
+ 			}
+-			ann["opendatahub.io/managed"] = "false"
++			ann[AnnotationManaged] = "false"
+ 			r.SetAnnotations(ann)
+ 			return
+ 		}
+--- a/maas-controller/pkg/reconciler/externalmodel/reconciler.go
++++ b/maas-controller/pkg/reconciler/externalmodel/reconciler.go
+@@ -227,13 +227,28 @@ func (r *Reconciler) deleteIfExists(ctx context.Context, log logr.Logger, kind,
+ 		}
+ 		return fmt.Errorf("failed to get %s %s/%s: %w", kind, namespace, name, err)
+ 	}
++	if !isManaged(obj) {
++		log.Info("Resource opted out of management, skipping deletion", "kind", kind, "name", name, "namespace", namespace)
++		return nil
++	}
+ 	log.Info("Deleting resource", "kind", kind, "name", name)
+ 	if err := r.Delete(ctx, obj); err != nil && !apierrors.IsNotFound(err) {
+ 		return fmt.Errorf("failed to delete %s %s/%s: %w", kind, namespace, name, err)
+ 	}
+ 	return nil
+ }
+ 
++// isManaged reports whether obj has opted into maas/opendatahub controller management.
++// When the annotation is absent or any value other than "false", the resource is managed.
++// Only an explicit opendatahub.io/managed=false opts the resource out.
++func isManaged(obj metav1.Object) bool {
++	val, ok := obj.GetAnnotations()[tenantreconcile.AnnotationManaged]
++	if !ok {
++		return true
++	}
++	return val != "false"
++}
++
+ // applyService creates or updates a Service.
+ func (r *Reconciler) applyService(ctx context.Context, log logr.Logger, desired *corev1.Service) error {
+ 	existing := &corev1.Service{}
+@@ -245,6 +260,10 @@ func (r *Reconciler) applyService(ctx context.Context, log logr.Logger, desired
+ 	if err != nil {
+ 		return err
+ 	}
++	if !isManaged(existing) {
++		log.Info("Service opted out of management, skipping update", "name", existing.Name, "namespace", existing.Namespace)
++		return nil
++	}
+ 	specChanged := !equality.Semantic.DeepEqual(existing.Spec, desired.Spec)
+ 	ownerChanged := !equality.Semantic.DeepEqual(existing.OwnerReferences, desired.OwnerReferences)
+ 	labelsChanged := !equality.Semantic.DeepEqual(existing.Labels, desired.Labels)
+@@ -270,6 +289,10 @@ func (r *Reconciler) applyUnstructured(ctx context.Context, log logr.Logger, des
+ 	if err != nil {
+ 		return err
+ 	}
++	if !isManaged(existing) {
++		log.Info("Resource opted out of management, skipping update", "kind", existing.GetKind(), "name", existing.GetName(), "namespace", existing.GetNamespace())
++		return nil
++	}
+ 	desired.SetResourceVersion(existing.GetResourceVersion())
+ 	log.Info("Updating resource", "kind", desired.GetKind(), "name", desired.GetName())
+ 	return r.Update(ctx, desired)
+@@ -286,6 +309,10 @@ func (r *Reconciler) applyHTTPRoute(ctx context.Context, log logr.Logger, desire
+ 	if err != nil {
+ 		return err
+ 	}
++	if !isManaged(existing) {
++		log.Info("HTTPRoute opted out of management, skipping update", "name", existing.Name, "namespace", existing.Namespace)
++		return nil
++	}
+ 	existing.Spec = desired.Spec
+ 	existing.Labels = desired.Labels
+ 	existing.OwnerReferences = desired.OwnerReferences
